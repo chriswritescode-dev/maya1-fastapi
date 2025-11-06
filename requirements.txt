@@ -1,0 +1,69 @@
+# Veena3 TTS Inference - Complete Requirements
+# Installation: pip install -r requirements.txt
+# OR: Use venv (recommended): source venv/bin/activate && pip install -r requirements.txt
+
+# ============================================================================
+# Core ML Framework
+# ============================================================================
+torch>=2.5.0
+torchvision>=0.20.0
+torchaudio>=2.5.0
+transformers>=4.57.0
+accelerate>=1.10.0
+
+# ============================================================================
+# Inference Engine
+# ============================================================================
+vllm>=0.11.0
+xformers>=0.0.32
+
+# ============================================================================
+# Audio Processing
+# ============================================================================
+snac>=1.2.1
+soundfile>=0.13.0
+numpy>=2.1.0
+librosa>=0.11.0
+scipy>=1.15.0
+
+# ============================================================================
+# Web Framework & API
+# ============================================================================
+fastapi>=0.119.0
+uvicorn[standard]>=0.38.0
+pydantic>=2.12.0
+pydantic-settings>=2.11.0
+python-multipart>=0.0.20
+httpx>=0.28.0
+
+# ============================================================================
+# Testing
+# ============================================================================
+pytest>=8.4.0
+pytest-asyncio>=1.2.0
+
+# ============================================================================
+# Utilities
+# ============================================================================
+python-dotenv>=1.1.0
+huggingface-hub>=0.35.0
+tqdm>=4.67.0
+openai>=2.5.0
+flashinfer-python
+python-Levenshtein>=0.21.0
+
+# ============================================================================
+# Optional: Performance Optimization
+# ============================================================================
+# FlashInfer - Requires exact PyTorch version match
+# NOTE: Currently incompatible with PyTorch 2.5+
+# Uncomment when PyTorch 2.4 is used:
+# flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
+
+# ============================================================================
+# System Requirements
+# ============================================================================
+# - Python 3.10+
+# - CUDA 12.1+ (for PyTorch)
+# - NVIDIA GPU with 16GB+ VRAM (40GB recommended for 3B model)
+# - Ubuntu 20.04+ or similar Linux distribution
