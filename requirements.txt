@@ -51,6 +51,7 @@ tqdm>=4.67.0
 openai>=2.5.0
 flashinfer-python
 python-Levenshtein>=0.21.0
+pydub>=0.25.1
 
 # ============================================================================
 # Optional: Performance Optimization

@@ -93,3 +93,18 @@ DEFAULT_SEED = None  # None = random, set integer for reproducibility
 STREAM_BUFFER_SIZE = 28  # 4 frames (process every 28 tokens)
 SNAC_BATCH_SIZE = 64
 SNAC_BATCH_TIMEOUT_MS = 15
+
+# OpenAI TTS API compatibility
+OPENAI_VOICE_MAPPINGS = {
+    "alloy": "Neutral voice with balanced tone and clear articulation",
+    "echo": "Male voice with slight echo and deep resonance",
+    "fable": "Storyteller voice with warm, engaging tone and expressive quality",
+    "onyx": "Deep male voice with authoritative tone and strong presence",
+    "nova": "Female voice with bright, energetic tone and clear pronunciation",
+    "shimmer": "Female voice with soft, gentle tone and smooth delivery"
+}
+
+OPENAI_SUPPORTED_VOICES = list(OPENAI_VOICE_MAPPINGS.keys())
+OPENAI_SUPPORTED_FORMATS = ["mp3", "opus", "aac", "flac", "wav", "pcm"]
+OPENAI_DEFAULT_MODEL = "tts-1"
+OPENAI_SUPPORTED_MODELS = ["tts-1", "tts-1-hd"]
