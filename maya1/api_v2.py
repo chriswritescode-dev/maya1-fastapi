@@ -77,7 +77,7 @@ async def startup_event():
     prompt_builder = Maya1PromptBuilder(model.tokenizer, model)
     
     # Initialize SNAC decoder
-    snac_decoder = SNACDecoder(enable_batching=False, max_batch_size=SNAC_BATCH_SIZE, batch_timeout_ms=SNAC_BATCH_TIMEOUT_MS)
+    snac_decoder = SNACDecoder(enable_batching=True, max_batch_size=SNAC_BATCH_SIZE, batch_timeout_ms=SNAC_BATCH_TIMEOUT_MS)
     if snac_decoder.enable_batching:
         await snac_decoder.start_batch_processor()
     

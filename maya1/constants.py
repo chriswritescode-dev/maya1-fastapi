@@ -91,7 +91,7 @@ DEFAULT_SEED = None  # None = random, set integer for reproducibility
 
 # Streaming configuration
 STREAM_BUFFER_SIZE = 28  # 4 frames (process every 28 tokens)
-SNAC_BATCH_SIZE = 1
+SNAC_BATCH_SIZE = 2
 SNAC_BATCH_TIMEOUT_MS = 50
 
 # OpenAI TTS API compatibility

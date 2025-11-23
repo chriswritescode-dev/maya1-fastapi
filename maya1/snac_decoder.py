@@ -538,23 +538,32 @@ class SNACDecoder:
             del codes
             codes = None
             
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            
             audio_batch = self.snac_model.decoder(z_q)
             
             del z_q
             z_q = None
             
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            
             for batch_idx, orig_idx in enumerate(valid_indices):
-                audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
+                audio = audio_batch[batch_idx, 0].detach().cpu().numpy().copy()
                 
                 if sliding_window_flags[orig_idx]:
                     if len(audio) >= 4096:
-                        audio = audio[2048:4096]
+                        audio = audio[2048:4096].copy()
                 else:
                     if trim_warmup_flags[orig_idx] and len(audio) > 2048:
-                        audio = audio[2048:]
+                        audio = audio[2048:].copy()
                 
                 audio_int16 = (audio * 32767).astype(np.int16)
                 audio_bytes_list[orig_idx] = audio_int16.tobytes()
+                
+                del audio
+                del audio_int16
             
             del audio_batch
             audio_batch = None
