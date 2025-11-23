@@ -4,6 +4,7 @@ Loads Maya1 model with vLLM engine and validates emotion tags.
 """
 
 import os
+from typing import Optional
 from transformers import AutoTokenizer
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
 from .constants import (
@@ -18,7 +19,7 @@ class Maya1Model:
     
     def __init__(
         self,
-        model_path: str = None,
+        model_path: Optional[str] = None,
         dtype: str = "bfloat16",
         max_model_len: int = DEFAULT_MAX_MODEL_LEN,
         gpu_memory_utilization: float = 0.85,
@@ -35,18 +36,26 @@ class Maya1Model:
             gpu_memory_utilization: GPU memory fraction
             tensor_parallel_size: Number of GPUs
         """
-        # Use provided path or environment variable or default
         if model_path is None:
             model_path = os.environ.get(
                 'MAYA1_MODEL_PATH',
                 os.path.expanduser('~/models/maya1-voice')
             )
         
+        dtype = str(os.environ.get('MAYA1_MODEL_DTYPE', dtype))
+        max_model_len = int(os.environ.get('MAYA1_MAX_MODEL_LEN', str(max_model_len)))
+        gpu_memory_utilization = float(os.environ.get('MAYA1_GPU_MEMORY_UTILIZATION', str(gpu_memory_utilization)))
+        tensor_parallel_size = int(os.environ.get('MAYA1_TENSOR_PARALLEL_SIZE', str(tensor_parallel_size)))
+        
         self.model_path = model_path
         self.dtype = dtype
         
         print(f"Initializing Maya1 Model")
         print(f"Model: {model_path}")
+        print(f"Data Type: {dtype}")
+        print(f"Max Model Length: {max_model_len}")
+        print(f"GPU Memory Utilization: {gpu_memory_utilization}")
+        print(f"Tensor Parallel Size: {tensor_parallel_size}")
         
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
