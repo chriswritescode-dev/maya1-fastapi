@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import asyncio
+import gc
 from typing import List, Optional, Tuple
 from snac import SNAC
 
@@ -63,7 +64,6 @@ class SNACDecoder:
     
     def _compile_model(self):
         """Compile SNAC decoder with torch.compile"""
-        # Warm up with various sizes
         for frames in [4, 16, 32]:
             dummy_codes = [
                 torch.randint(0, 4096, (1, frames), device=self.device),
@@ -74,7 +74,6 @@ class SNACDecoder:
                 z_q = self.snac_model.quantizer.from_codes(dummy_codes)
                 _ = self.snac_model.decoder(z_q)
         
-        # Apply compilation
         self.snac_model.decoder = torch.compile(
             self.snac_model.decoder,
             mode="max-autotune"
@@ -85,6 +84,12 @@ class SNACDecoder:
         )
         
         print(f"SNAC decoder compiled")
+    
+    def _cleanup_memory(self):
+        """Force cleanup of GPU memory"""
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+        gc.collect()
     
     def unpack_snac_from_7(self, vocab_ids: List[int]) -> List[List[int]]:
         """
@@ -175,41 +180,46 @@ class SNACDecoder:
             print(f"Not enough SNAC tokens: {len(snac_tokens)} < {SNAC_TOKENS_PER_FRAME}")
             return None
         
-        # Unpack to 3 levels
         levels = self.unpack_snac_from_7(snac_tokens)
         
-        if not levels[0]:  # No frames after unpacking
+        if not levels[0]:
             return None
         
-        # Convert to tensors
-        codes = [
-            torch.tensor(level, dtype=torch.long, device=self.device).unsqueeze(0)
-            for level in levels
-        ]
+        codes = None
+        z_q = None
+        audio_tensor = None
         
-        # Decode through SNAC
-        z_q = self.snac_model.quantizer.from_codes(codes)
-        audio = self.snac_model.decoder(z_q)
+        try:
+            codes = [
+                torch.tensor(level, dtype=torch.long, device=self.device).unsqueeze(0)
+                for level in levels
+            ]
+            
+            z_q = self.snac_model.quantizer.from_codes(codes)
+            audio_tensor = self.snac_model.decoder(z_q)
+            
+            audio = audio_tensor[0, 0].detach().cpu().numpy()
+            
+        finally:
+            if audio_tensor is not None:
+                del audio_tensor
+            if z_q is not None:
+                del z_q
+            if codes is not None:
+                for code in codes:
+                    del code
+                del codes
+            
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
         
-        # Extract audio (remove padding if any)
-        # SNAC decoder outputs: [batch, 1, samples]
-        audio = audio[0, 0].cpu().numpy()
-        
-        # Sliding window mode: only keep middle 2048 samples
-        # This eliminates popping/cracking when using overlapping 28-token windows
         if use_sliding_window:
             if len(audio) >= 4096:
-                audio = audio[2048:4096]  # Keep middle portion only
-            else:
-                # For shorter audio, keep everything (final chunk)
-                pass
+                audio = audio[2048:4096]
         else:
-            # Standard mode: trim warm-up samples
-            # Default: 2048 samples for first chunk, 0 for subsequent chunks
-            # Can be customized via trim_amount parameter
             if trim_warmup:
                 if trim_amount is None:
-                    trim_amount = 2048  # Default full trim
+                    trim_amount = 2048
                 
                 if len(audio) > trim_amount:
                     audio = audio[trim_amount:]
@@ -451,7 +461,7 @@ class SNACDecoder:
         token_sequences: List[List[int]], 
         trim_warmup_flags: List[bool],
         sliding_window_flags: List[bool]
-    ) -> List[Optional[bytes]]:
+    ):
         """
         Decode multiple sequences with same length in parallel.
         
@@ -466,50 +476,57 @@ class SNACDecoder:
         if not token_sequences:
             return []
         
-        # Unpack all sequences
         unpacked_list = [self.unpack_snac_from_7(tokens) for tokens in token_sequences]
         
-        # Check all have valid frames
         valid_indices = [i for i, levels in enumerate(unpacked_list) if levels[0]]
         
         if not valid_indices:
             return [None] * len(token_sequences)
         
-        # Stack into batched tensors
         batch_size = len(valid_indices)
         frames = len(unpacked_list[valid_indices[0]][0])
         
-        # Build batched codes [batch, frames], [batch, 2*frames], [batch, 4*frames]
-        codes = [
-            torch.stack([
-                torch.tensor(unpacked_list[i][level_idx], dtype=torch.long, device=self.device)
-                for i in valid_indices
-            ], dim=0)
-            for level_idx in range(3)
-        ]
-        
-        # Batched decode
-        z_q = self.snac_model.quantizer.from_codes(codes)
-        audio_batch = self.snac_model.decoder(z_q)  # [batch, 1, samples]
-        
-        # Extract and convert to bytes
+        codes = None
+        z_q = None
+        audio_batch = None
         audio_bytes_list = [None] * len(token_sequences)
         
-        for batch_idx, orig_idx in enumerate(valid_indices):
-            audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
+        try:
+            codes = [
+                torch.stack([
+                    torch.tensor(unpacked_list[i][level_idx], dtype=torch.long, device=self.device)
+                    for i in valid_indices
+                ], dim=0)
+                for level_idx in range(3)
+            ]
             
-            # Apply sliding window or trim warmup based on flags
-            if sliding_window_flags[orig_idx]:
-                # Sliding window mode: keep middle 2048 samples only
-                if len(audio) >= 4096:
-                    audio = audio[2048:4096]
-            else:
-                # Standard mode: trim warm-up if requested
-                if trim_warmup_flags[orig_idx] and len(audio) > 2048:
-                    audio = audio[2048:]
+            z_q = self.snac_model.quantizer.from_codes(codes)
+            audio_batch = self.snac_model.decoder(z_q)
             
-            # Convert to int16
-            audio_int16 = (audio * 32767).astype(np.int16)
-            audio_bytes_list[orig_idx] = audio_int16.tobytes()
+            for batch_idx, orig_idx in enumerate(valid_indices):
+                audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
+                
+                if sliding_window_flags[orig_idx]:
+                    if len(audio) >= 4096:
+                        audio = audio[2048:4096]
+                else:
+                    if trim_warmup_flags[orig_idx] and len(audio) > 2048:
+                        audio = audio[2048:]
+                
+                audio_int16 = (audio * 32767).astype(np.int16)
+                audio_bytes_list[orig_idx] = audio_int16.tobytes()
+        
+        finally:
+            if audio_batch is not None:
+                del audio_batch
+            if z_q is not None:
+                del z_q
+            if codes is not None:
+                for code in codes:
+                    del code
+                del codes
+            
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
         
         return audio_bytes_list
