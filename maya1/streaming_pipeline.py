@@ -90,6 +90,7 @@ class Maya1SlidingWindowPipeline:
         chunk_count = 0
         total_tokens_seen = 0
         cleanup_counter = 0
+        end_token_seen = False
         
         async for output in self.model.generate_stream(prompt, sampling_params):
             generated_token_ids = output.outputs[0].token_ids
@@ -99,6 +100,7 @@ class Maya1SlidingWindowPipeline:
             
             for token_id in new_tokens:
                 if token_id == CODE_END_TOKEN_ID:
+                    end_token_seen = True
                     break
                 
                 if SNAC_MIN_ID <= token_id <= SNAC_MAX_ID:
@@ -143,16 +145,33 @@ class Maya1SlidingWindowPipeline:
                     import gc
                     gc.collect()
             
-            if CODE_END_TOKEN_ID in new_tokens:
+            if end_token_seen:
                 break
         
         # Final chunk: decode remaining tokens
         remaining_tokens = len(snac_buffer) - last_yield_position
-        if remaining_tokens >= self.WINDOW_SIZE:
-            window = snac_buffer[-self.WINDOW_SIZE:]
-            audio_bytes = await self.snac_decoder.decode_single_async(window)
-            if audio_bytes:
-                yield audio_bytes[-self.MIDDLE_SAMPLES * 2:]
+        
+        # Process final chunk even if smaller than window size
+        if remaining_tokens >= 7:  # At least 1 frame (7 tokens)
+            # If we have a full window, use it for better quality
+            if remaining_tokens >= self.WINDOW_SIZE:
+                window = snac_buffer[-self.WINDOW_SIZE:]
+                audio_bytes = await self.snac_decoder.decode_single_async(window)
+                if audio_bytes:
+                    # Only keep the last part for the final chunk
+                    yield audio_bytes[-self.MIDDLE_SAMPLES * 2:]
+            else:
+                # Process whatever tokens we have left (must be divisible by 7)
+                final_tokens = snac_buffer[last_yield_position:]
+                # Ensure we have complete frames
+                complete_frames = len(final_tokens) // 7
+                if complete_frames > 0:
+                    final_tokens = final_tokens[:complete_frames * 7]
+                    audio_bytes = await self.snac_decoder.decode_single_async(
+                        final_tokens, trim_warmup=False
+                    )
+                    if audio_bytes:
+                        yield audio_bytes
         
         frames = len(snac_buffer) // 7
         duration = frames / 6.86
