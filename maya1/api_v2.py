@@ -426,7 +426,7 @@ async def openai_tts(request: OpenAITTSRequest):
         # Map OpenAI voice to Maya1 description
         description = OPENAI_VOICE_MAPPINGS[request.voice]
         
-        audio_bytes = await pipeline.generate_speech(
+        pcm_bytes = await pipeline.generate_speech(
             description=description,
             text=request.input,
             temperature=DEFAULT_TEMPERATURE,
@@ -436,8 +436,19 @@ async def openai_tts(request: OpenAITTSRequest):
             seed=None,
         )
         
-        if audio_bytes is None:
+        if pcm_bytes is None:
             raise HTTPException(status_code=500, detail="Audio generation failed")
+        
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(AUDIO_SAMPLE_RATE)
+            wav_file.writeframes(pcm_bytes)
+        
+        audio_bytes = wav_buffer.getvalue()
+        del pcm_bytes
+        del wav_buffer
         
         if request.speed != 1.0:
             speed_adjusted_audio = adjust_audio_speed(audio_bytes, request.speed)
