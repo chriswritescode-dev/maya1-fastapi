@@ -209,44 +209,46 @@ class SNACDecoder:
         z_q = None
         audio_tensor = None
         
-        try:
-            codes = [
-                torch.tensor(level, dtype=torch.long, device=self.device).unsqueeze(0)
-                for level in levels
-            ]
-            
-            z_q = self.snac_model.quantizer.from_codes(codes)
-            
-            # Delete codes immediately after use
-            del codes
-            codes = None
-            
-            audio_tensor = self.snac_model.decoder(z_q)
-            
-            # Delete z_q immediately after use
-            del z_q
-            z_q = None
-            
-            audio = audio_tensor[0, 0].detach().cpu().numpy()
-            
-            # Delete audio_tensor immediately after extracting audio
-            del audio_tensor
-            audio_tensor = None
-            
-        finally:
-            # Ensure cleanup on error
-            if audio_tensor is not None:
-                del audio_tensor
-            if z_q is not None:
-                del z_q
-            if codes is not None:
-                for code in codes:
-                    del code
+        # Use no_grad to prevent gradient tracking
+        with torch.no_grad():
+            try:
+                codes = [
+                    torch.tensor(level, dtype=torch.long, device=self.device).unsqueeze(0)
+                    for level in levels
+                ]
+                
+                z_q = self.snac_model.quantizer.from_codes(codes)
+                
+                # Delete codes immediately after use
                 del codes
-            
-            # Single cache clear at the end
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
+                codes = None
+                
+                audio_tensor = self.snac_model.decoder(z_q)
+                
+                # Delete z_q immediately after use
+                del z_q
+                z_q = None
+                
+                audio = audio_tensor[0, 0].detach().cpu().numpy()
+                
+                # Delete audio_tensor immediately after extracting audio
+                del audio_tensor
+                audio_tensor = None
+                
+            finally:
+                # Ensure cleanup on error
+                if audio_tensor is not None:
+                    del audio_tensor
+                if z_q is not None:
+                    del z_q
+                if codes is not None:
+                    for code in codes:
+                        del code
+                    del codes
+                
+                # Single cache clear at the end
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
         
         if use_sliding_window:
             if len(audio) >= 4096:
@@ -540,7 +542,6 @@ class SNACDecoder:
         if not token_sequences:
             return []
         
-        # Unpack sequences one at a time to avoid holding all in memory
         batch_size = len(token_sequences)
         audio_bytes_list = [None] * batch_size
         
@@ -561,92 +562,77 @@ class SNACDecoder:
         z_q = None
         audio_batch = None
         
-        try:
-            # Create tensors more efficiently - pre-allocate and fill
-            valid_batch_size = len(valid_indices)
-            codes = []
-            
-            for level_idx in range(3):
-                # Get the length of this level from the first valid sequence
-                level_len = len(valid_unpacked[0][level_idx])
+        # Use no_grad context to prevent gradient tracking and save memory
+        with torch.no_grad():
+            try:
+                # Create tensors efficiently
+                codes = []
+                for level_idx in range(3):
+                    # Stack all sequences for this level at once
+                    level_tensors = torch.stack([
+                        torch.tensor(unpacked[level_idx], dtype=torch.long, device=self.device)
+                        for unpacked in valid_unpacked
+                    ])
+                    codes.append(level_tensors)
                 
-                # Pre-allocate tensor for this level
-                level_tensor = torch.empty(
-                    (valid_batch_size, level_len), 
-                    dtype=torch.long, 
-                    device=self.device
-                )
+                # Clear unpacked data immediately
+                del valid_unpacked
                 
-                # Fill tensor in-place
-                for batch_idx, unpacked in enumerate(valid_unpacked):
-                    level_data = torch.tensor(
-                        unpacked[level_idx], 
-                        dtype=torch.long, 
-                        device=self.device
-                    )
-                    level_tensor[batch_idx] = level_data
-                    del level_data  # Immediate cleanup
+                # Process through model
+                z_q = self.snac_model.quantizer.from_codes(codes)
                 
-                codes.append(level_tensor)
-            
-            # Clear unpacked data immediately
-            del valid_unpacked
-            
-            # Process through model
-            z_q = self.snac_model.quantizer.from_codes(codes)
-            
-            # Delete codes immediately after use
-            del codes
-            codes = None
-            
-            audio_batch = self.snac_model.decoder(z_q)
-            
-            # Delete z_q immediately after use
-            del z_q
-            z_q = None
-            
-            # Process audio outputs without unnecessary copies
-            for batch_idx, orig_idx in enumerate(valid_indices):
-                # Get audio without copy
-                audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
-                
-                # Apply trimming based on flags (without intermediate copies)
-                if sliding_window_flags[orig_idx]:
-                    if len(audio) >= 4096:
-                        # Direct slice to int16
-                        audio_slice = audio[2048:4096]
-                        audio_int16 = (audio_slice * 32767).astype(np.int16)
-                    else:
-                        audio_int16 = (audio * 32767).astype(np.int16)
-                else:
-                    if trim_warmup_flags[orig_idx] and len(audio) > 2048:
-                        # Direct slice to int16
-                        audio_slice = audio[2048:]
-                        audio_int16 = (audio_slice * 32767).astype(np.int16)
-                    else:
-                        audio_int16 = (audio * 32767).astype(np.int16)
-                
-                audio_bytes_list[orig_idx] = audio_int16.tobytes()
-                
-                # Immediate cleanup
-                del audio_int16
-                del audio
-            
-            # Clean up audio batch
-            del audio_batch
-            audio_batch = None
-        
-        finally:
-            # Ensure cleanup even on error
-            if audio_batch is not None:
-                del audio_batch
-            if z_q is not None:
-                del z_q
-            if codes is not None:
+                # Delete codes immediately after use
                 del codes
-            
-            # Single cache clear at the end
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
+                codes = None
+                
+                audio_batch = self.snac_model.decoder(z_q)
+                
+                # Delete z_q immediately after use
+                del z_q
+                z_q = None
+                
+                # Process audio outputs without unnecessary copies
+                for batch_idx, orig_idx in enumerate(valid_indices):
+                    # Get audio without copy
+                    audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
+                    
+                    # Apply trimming based on flags (without intermediate copies)
+                    if sliding_window_flags[orig_idx]:
+                        if len(audio) >= 4096:
+                            # Direct slice to int16
+                            audio_slice = audio[2048:4096]
+                            audio_int16 = (audio_slice * 32767).astype(np.int16)
+                        else:
+                            audio_int16 = (audio * 32767).astype(np.int16)
+                    else:
+                        if trim_warmup_flags[orig_idx] and len(audio) > 2048:
+                            # Direct slice to int16
+                            audio_slice = audio[2048:]
+                            audio_int16 = (audio_slice * 32767).astype(np.int16)
+                        else:
+                            audio_int16 = (audio * 32767).astype(np.int16)
+                    
+                    audio_bytes_list[orig_idx] = audio_int16.tobytes()
+                    
+                    # Immediate cleanup
+                    del audio_int16
+                    del audio
+                
+                # Clean up audio batch
+                del audio_batch
+                audio_batch = None
+                
+            finally:
+                # Ensure cleanup even on error
+                if audio_batch is not None:
+                    del audio_batch
+                if z_q is not None:
+                    del z_q
+                if codes is not None:
+                    del codes
+                
+                # Single cache clear at the end
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
         
         return audio_bytes_list
