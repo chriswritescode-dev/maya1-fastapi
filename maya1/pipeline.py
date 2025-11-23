@@ -4,6 +4,7 @@ End-to-end pipeline for TTS generation (non-streaming).
 """
 
 import asyncio
+import torch
 from typing import Optional, List
 from vllm import SamplingParams
 
@@ -97,6 +98,10 @@ class Maya1Pipeline:
             frames = len(snac_codes) // 7
             duration_sec = frames / 6.86
             print(f" Generated {frames} frames (~{duration_sec:.1f}s audio)")
+        
+        # Clean up GPU memory
+        del snac_codes, generated_token_ids, output
+        torch.cuda.empty_cache()
         
         return audio_bytes
     

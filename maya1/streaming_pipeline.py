@@ -4,6 +4,7 @@ Implements sliding window technique for smooth streaming without artifacts.
 """
 
 import asyncio
+import torch
 from typing import AsyncGenerator, Optional
 from vllm import SamplingParams
 
@@ -157,3 +158,6 @@ class Maya1SlidingWindowPipeline:
         frames = len(snac_buffer) // 7
         duration = frames / 6.86
         print(f"Streamed {chunk_count} chunks (~{duration:.1f}s audio)")
+        
+        # Clean up GPU memory
+        torch.cuda.empty_cache()

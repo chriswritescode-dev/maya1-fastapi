@@ -189,13 +189,13 @@ class SNACDecoder:
         
         # Decode through SNAC
         z_q = self.snac_model.quantizer.from_codes(codes)
-        audio = self.snac_model.decoder(z_q)
+        audio_tensor = self.snac_model.decoder(z_q)
         
         # Extract audio (remove padding if any)
         # SNAC decoder outputs: [batch, 1, samples]
-        audio = audio[0, 0].cpu().numpy()
+        audio = audio_tensor[0, 0].cpu().numpy()
         
-        # Sliding window mode: only keep middle 2048 samples
+# Sliding window mode: only keep middle 2048 samples
         # This eliminates popping/cracking when using overlapping 28-token windows
         if use_sliding_window:
             if len(audio) >= 4096:
@@ -213,6 +213,10 @@ class SNACDecoder:
                 
                 if len(audio) > trim_amount:
                     audio = audio[trim_amount:]
+        
+        # Clean up GPU memory
+        del codes, z_q, audio_tensor
+        torch.cuda.empty_cache()
         
         return audio
     
@@ -473,7 +477,7 @@ class SNACDecoder:
         valid_indices = [i for i, levels in enumerate(unpacked_list) if levels[0]]
         
         if not valid_indices:
-            return [None] * len(token_sequences)
+            return [None] * len(token_sequences)  # type: ignore  # type: ignore
         
         # Stack into batched tensors
         batch_size = len(valid_indices)
@@ -493,7 +497,7 @@ class SNACDecoder:
         audio_batch = self.snac_model.decoder(z_q)  # [batch, 1, samples]
         
         # Extract and convert to bytes
-        audio_bytes_list = [None] * len(token_sequences)
+        audio_bytes_list: List[Optional[bytes]] = [None] * len(token_sequences)
         
         for batch_idx, orig_idx in enumerate(valid_indices):
             audio = audio_batch[batch_idx, 0].detach().cpu().numpy()

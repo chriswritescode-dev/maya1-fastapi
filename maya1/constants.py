@@ -73,7 +73,7 @@ AUDIO_BITS_PER_SAMPLE = 16
 # Generation defaults
 DEFAULT_TEMPERATURE = 0.4  # Lower temp for more stable generation
 DEFAULT_TOP_P = 0.9
-DEFAULT_MAX_TOKENS = 2048  # Reasonable default for most use cases
+DEFAULT_MAX_TOKENS = 4096  # Increased for longer audio generation
 DEFAULT_MIN_TOKENS = 28  # At least 4 SNAC frames
 DEFAULT_REPETITION_PENALTY = 1.1
 DEFAULT_SEED = None  # None = random, set integer for reproducibility
@@ -91,5 +91,5 @@ DEFAULT_SEED = None  # None = random, set integer for reproducibility
 
 # Streaming configuration
 STREAM_BUFFER_SIZE = 28  # 4 frames (process every 28 tokens)
-SNAC_BATCH_SIZE = 64
+SNAC_BATCH_SIZE = 16
 SNAC_BATCH_TIMEOUT_MS = 15
