@@ -12,7 +12,6 @@ from .model_loader import Maya1Model
 from .prompt_builder import Maya1PromptBuilder
 from .snac_decoder import SNACDecoder
 from .pipeline import Maya1Pipeline
-from .streaming_pipeline import Maya1SlidingWindowPipeline
 from .constants import (
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
@@ -56,7 +55,6 @@ model = None
 prompt_builder = None
 snac_decoder = None
 pipeline = None
-streaming_pipeline = None
 
 
 # ============================================================================
@@ -66,7 +64,7 @@ streaming_pipeline = None
 @app.on_event("startup")
 async def startup_event():
     """Initialize model on startup."""
-    global model, prompt_builder, snac_decoder, pipeline, streaming_pipeline
+    global model, prompt_builder, snac_decoder, pipeline
     
     print("\n" + "="*60)
     print(" Starting Maya1 TTS API Server")
@@ -76,14 +74,13 @@ async def startup_event():
     model = Maya1Model()
     prompt_builder = Maya1PromptBuilder(model.tokenizer, model)
     
-    # Initialize SNAC decoder
+    # Initialize SNAC decoder with batching
     snac_decoder = SNACDecoder(enable_batching=True, max_batch_size=SNAC_BATCH_SIZE, batch_timeout_ms=SNAC_BATCH_TIMEOUT_MS)
     if snac_decoder.enable_batching:
         await snac_decoder.start_batch_processor()
     
-    # Initialize pipelines
+    # Initialize pipeline
     pipeline = Maya1Pipeline(model, prompt_builder, snac_decoder)
-    streaming_pipeline = Maya1SlidingWindowPipeline(model, prompt_builder, snac_decoder)
     
     print("\n" + "="*60)
     print("Maya1 TTS API Server Ready")
@@ -258,43 +255,6 @@ def get_content_type_for_format(format: str) -> str:
 # Request/Response Models
 # ============================================================================
 
-class TTSRequest(BaseModel):
-    """TTS generation request."""
-    description: str = Field(
-        ...,
-        description="Voice description (e.g., 'Male voice in their 30s with american accent')"
-    )
-    text: str = Field(
-        ...,
-        description="Text to synthesize (can include <emotion> tags)"
-    )
-    temperature: Optional[float] = Field(
-        default=DEFAULT_TEMPERATURE,
-        description="Sampling temperature"
-    )
-    top_p: Optional[float] = Field(
-        default=DEFAULT_TOP_P,
-        description="Nucleus sampling"
-    )
-    max_tokens: Optional[int] = Field(
-        default=DEFAULT_MAX_TOKENS,
-        description="Maximum tokens to generate"
-    )
-    repetition_penalty: Optional[float] = Field(
-        default=DEFAULT_REPETITION_PENALTY,
-        description="Repetition penalty"
-    )
-    seed: Optional[int] = Field(
-        default=None,
-        description="Random seed for reproducibility",
-        ge=0,
-    )
-    stream: bool = Field(
-        default=False,
-        description="Stream audio (True) or return complete WAV (False)"
-    )
-
-
 class OpenAITTSRequest(BaseModel):
     """OpenAI-compatible TTS request."""
     model: str = Field(
@@ -334,7 +294,6 @@ async def root():
         "status": "running",
         "model": "Maya1-Voice (open source)",
         "endpoints": {
-            "maya1_generate": "/v1/tts/generate (POST) - Maya1 native API",
             "openai_speech": "/v1/audio/speech (POST) - OpenAI compatible API",
             "health": "/health (GET)",
         },
@@ -357,42 +316,8 @@ async def health_check():
 
 
 # ============================================================================
-# TTS Generation Endpoints
+# OpenAI TTS Endpoint
 # ============================================================================
-
-@app.post("/v1/tts/generate")
-async def generate_tts(request: TTSRequest):
-    """Generate TTS audio from description and text (Maya1 native API)."""
-    
-    try:
-        # Route to streaming or non-streaming
-        if request.stream:
-            return await _generate_tts_streaming(
-                description=request.description,
-                text=request.text,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                max_tokens=request.max_tokens,
-                repetition_penalty=request.repetition_penalty,
-                seed=request.seed,
-            )
-        else:
-            return await _generate_tts_complete(
-                description=request.description,
-                text=request.text,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                max_tokens=request.max_tokens,
-                repetition_penalty=request.repetition_penalty,
-                seed=request.seed,
-            )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f" Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/v1/audio/speech")
 async def openai_tts(request: OpenAITTSRequest):
@@ -485,106 +410,6 @@ async def openai_tts(request: OpenAITTSRequest):
         raise
     except Exception as e:
         print(f" OpenAI TTS Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-async def _generate_tts_complete(
-    description: str,
-    text: str,
-    temperature: float,
-    top_p: float,
-    max_tokens: int,
-    repetition_penalty: float,
-    seed: Optional[int],
-):
-    """Generate complete WAV file (non-streaming)."""
-    
-    try:
-        import asyncio
-        
-        # Generate audio
-        audio_bytes = await asyncio.wait_for(
-            pipeline.generate_speech(
-                description=description,
-                text=text,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty,
-                seed=seed,
-            ),
-            timeout=GENERATE_TIMEOUT
-        )
-        
-        if audio_bytes is None:
-            raise Exception("Audio generation failed")
-        
-        # Create WAV file
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(AUDIO_SAMPLE_RATE)
-            wav_file.writeframes(audio_bytes)
-        
-        wav_buffer.seek(0)
-        
-        return StreamingResponse(
-            wav_buffer,
-            media_type="audio/wav",
-            headers={"Content-Disposition": "attachment; filename=output.wav"}
-        )
-    
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Generation timeout")
-
-
-async def _generate_tts_streaming(
-    description: str,
-    text: str,
-    temperature: float,
-    top_p: float,
-    max_tokens: int,
-    repetition_penalty: float,
-    seed: Optional[int],
-):
-    """Generate streaming audio."""
-    start_time = time.time()
-    first_audio_time = None
-    
-    async def audio_stream_generator():
-        """Generate audio stream with WAV header."""
-        nonlocal first_audio_time
-        
-        # Send WAV header first
-        yield create_wav_header(sample_rate=AUDIO_SAMPLE_RATE, channels=1, bits_per_sample=16)
-        
-        # Stream audio chunks
-        async for audio_chunk in streaming_pipeline.generate_speech_stream(
-            description=description,
-            text=text,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty,
-            seed=seed,
-        ):
-            if first_audio_time is None:
-                first_audio_time = time.time()
-                ttfb_ms = (first_audio_time - start_time) * 1000
-                print(f"⏱️  TTFB: {ttfb_ms:.1f}ms")
-            
-            yield audio_chunk
-    
-    try:
-        return StreamingResponse(
-            audio_stream_generator(),
-            media_type="audio/wav",
-            headers={"Cache-Control": "no-cache"}
-        )
-    
-    except Exception as e:
-        print(f"Streaming error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

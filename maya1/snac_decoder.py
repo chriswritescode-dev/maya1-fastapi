@@ -186,8 +186,7 @@ class SNACDecoder:
         self, 
         snac_tokens: List[int], 
         trim_warmup: bool = True, 
-        trim_amount: Optional[int] = None,
-        use_sliding_window: bool = False
+        trim_amount: Optional[int] = None
     ) -> Optional[np.ndarray]:
         """
         Decode SNAC tokens to audio waveform.
@@ -196,8 +195,6 @@ class SNACDecoder:
             snac_tokens: List of SNAC token IDs (7*n tokens)
             trim_warmup: Whether to trim SNAC warmup samples (default: True)
             trim_amount: Number of samples to trim (default: 2048 for first chunk, 0 for others)
-                        Can be set to a smaller value (e.g., 512) for intermediate chunks
-            use_sliding_window: If True, only return middle 2048 samples (for sliding window streaming)
         
         Returns:
             Audio waveform as numpy array (float32, 24kHz mono)
@@ -258,24 +255,19 @@ class SNACDecoder:
                 if self.device == "cuda":
                     torch.cuda.empty_cache()
         
-        if use_sliding_window:
-            if len(audio) >= 4096:
-                audio = audio[2048:4096]
-        else:
-            if trim_warmup:
-                if trim_amount is None:
-                    trim_amount = 2048
-                
-                if len(audio) > trim_amount:
-                    audio = audio[trim_amount:]
+        if trim_warmup:
+            if trim_amount is None:
+                trim_amount = 2048
+            
+            if len(audio) > trim_amount:
+                audio = audio[trim_amount:]
         
         return audio
     
     def decode_to_bytes(
         self, 
         snac_tokens: List[int], 
-        trim_warmup: bool = True,
-        use_sliding_window: bool = False
+        trim_warmup: bool = True
     ) -> Optional[bytes]:
         """
         Decode SNAC tokens to audio bytes (int16 PCM).
@@ -283,13 +275,12 @@ class SNACDecoder:
         Args:
             snac_tokens: List of SNAC token IDs
             trim_warmup: Whether to trim SNAC warmup samples (default: True)
-            use_sliding_window: If True, only return middle 2048 samples (for sliding window streaming)
         
         Returns:
             Audio as bytes (int16 PCM, 24kHz mono)
             Returns None if decode fails
         """
-        audio = self.decode(snac_tokens, trim_warmup=trim_warmup, use_sliding_window=use_sliding_window)
+        audio = self.decode(snac_tokens, trim_warmup=trim_warmup)
         
         if audio is None:
             return None
@@ -368,8 +359,7 @@ class SNACDecoder:
     async def decode_single_async(
         self, 
         snac_tokens: List[int], 
-        trim_warmup: bool = True,
-        use_sliding_window: bool = False
+        trim_warmup: bool = True
     ) -> Optional[bytes]:
         """
         Async decode for batching support.
@@ -379,20 +369,19 @@ class SNACDecoder:
         Args:
             snac_tokens: List of SNAC token IDs
             trim_warmup: Whether to trim SNAC warmup samples (default: True)
-            use_sliding_window: If True, only return middle 2048 samples (for sliding window streaming)
         
         Returns:
             Audio bytes or None if decode fails
         """
         if not self.enable_batching:
             # Fallback to synchronous decode
-            return self.decode_to_bytes(snac_tokens, trim_warmup=trim_warmup, use_sliding_window=use_sliding_window)
+            return self.decode_to_bytes(snac_tokens, trim_warmup=trim_warmup)
         
         # Create future for result
         result_future = asyncio.Future()
         
-        # Add to queue (include trim_warmup and sliding_window flags)
-        await self.request_queue.put((snac_tokens, trim_warmup, use_sliding_window, result_future))
+        # Add to queue
+        await self.request_queue.put((snac_tokens, trim_warmup, result_future))
         
         # Wait for result
         return await result_future
@@ -417,12 +406,12 @@ class SNACDecoder:
                 import traceback
                 traceback.print_exc()
     
-    async def _collect_batch(self) -> List[Tuple[List[int], bool, bool, asyncio.Future]]:
+    async def _collect_batch(self) -> List[Tuple[List[int], bool, asyncio.Future]]:
         """
         Collect requests into a batch.
         Waits for timeout or until batch is full.
         Returns:
-            List of (tokens, trim_warmup, use_sliding_window, future) tuples
+            List of (tokens, trim_warmup, future) tuples
         """
         batch = []
         timeout_sec = self.batch_timeout_ms / 1000.0
@@ -452,11 +441,11 @@ class SNACDecoder:
         
         return batch
     
-    async def _process_batch(self, batch: List[Tuple[List[int], bool, bool, asyncio.Future]]):
+    async def _process_batch(self, batch: List[Tuple[List[int], bool, asyncio.Future]]):
         """
         Process a batch of decode requests.
         Args:
-            batch: List of (tokens, trim_warmup, use_sliding_window, future) tuples
+            batch: List of (tokens, trim_warmup, future) tuples
         """
         if not batch:
             return
@@ -467,8 +456,7 @@ class SNACDecoder:
         # Extract components
         token_sequences = [item[0] for item in batch]
         trim_warmup_flags = [item[1] for item in batch]
-        sliding_window_flags = [item[2] for item in batch]
-        futures = [item[3] for item in batch]
+        futures = [item[2] for item in batch]
         
         lengths = [len(tokens) for tokens in token_sequences]
         can_batch_efficiently = len(set(lengths)) == 1
@@ -487,7 +475,7 @@ class SNACDecoder:
             # Efficient batching: all same length
             try:
                 audio_bytes_list = await self._decode_batch_same_length(
-                    token_sequences, trim_warmup_flags, sliding_window_flags
+                    token_sequences, trim_warmup_flags
                 )
                 
                 # Set results and immediately clear references
@@ -507,10 +495,10 @@ class SNACDecoder:
                         future.set_exception(e)
         else:
             # Sequential decode (different lengths or single item)
-            for tokens, trim_warmup, use_sliding_window, future in batch:
+            for tokens, trim_warmup, future in batch:
                 try:
                     audio_bytes = self.decode_to_bytes(
-                        tokens, trim_warmup=trim_warmup, use_sliding_window=use_sliding_window
+                        tokens, trim_warmup=trim_warmup
                     )
                     if not future.done():
                         future.set_result(audio_bytes)
@@ -526,7 +514,6 @@ class SNACDecoder:
         # Clear batch data
         del token_sequences
         del trim_warmup_flags
-        del sliding_window_flags
         del futures
         del batch
         
@@ -540,8 +527,7 @@ class SNACDecoder:
     async def _decode_batch_same_length(
         self, 
         token_sequences: List[List[int]], 
-        trim_warmup_flags: List[bool],
-        sliding_window_flags: List[bool]
+        trim_warmup_flags: List[bool]
     ):
         """
         Decode multiple sequences with same length in parallel.
@@ -550,7 +536,6 @@ class SNACDecoder:
         Args:
             token_sequences: List of token sequences (all same length)
             trim_warmup_flags: List of trim_warmup flags for each sequence
-            sliding_window_flags: List of use_sliding_window flags for each sequence
         
         Returns:
             List of audio bytes
@@ -612,21 +597,13 @@ class SNACDecoder:
                     # Get audio without copy
                     audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
                     
-                    # Apply trimming based on flags (without intermediate copies)
-                    if sliding_window_flags[orig_idx]:
-                        if len(audio) >= 4096:
-                            # Direct slice to int16
-                            audio_slice = audio[2048:4096]
-                            audio_int16 = (audio_slice * 32767).astype(np.int16)
-                        else:
-                            audio_int16 = (audio * 32767).astype(np.int16)
+                    # Apply trimming if requested
+                    if trim_warmup_flags[orig_idx] and len(audio) > 2048:
+                        # Direct slice to int16
+                        audio_slice = audio[2048:]
+                        audio_int16 = (audio_slice * 32767).astype(np.int16)
                     else:
-                        if trim_warmup_flags[orig_idx] and len(audio) > 2048:
-                            # Direct slice to int16
-                            audio_slice = audio[2048:]
-                            audio_int16 = (audio_slice * 32767).astype(np.int16)
-                        else:
-                            audio_int16 = (audio * 32767).astype(np.int16)
+                        audio_int16 = (audio * 32767).astype(np.int16)
                     
                     audio_bytes_list[orig_idx] = audio_int16.tobytes()
                     
