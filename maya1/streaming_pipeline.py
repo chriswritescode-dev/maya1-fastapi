@@ -85,52 +85,41 @@ class Maya1SlidingWindowPipeline:
             seed=seed if seed is not None else DEFAULT_SEED,
         )
         
-        # Stream tokens
         snac_buffer = []
         last_yield_position = 0
         chunk_count = 0
         total_tokens_seen = 0
+        cleanup_counter = 0
         
         async for output in self.model.generate_stream(prompt, sampling_params):
-            # Get latest generated tokens (cumulative list)
             generated_token_ids = output.outputs[0].token_ids
             
-            # Process only NEW tokens since last iteration
             new_tokens = generated_token_ids[total_tokens_seen:]
             total_tokens_seen = len(generated_token_ids)
             
-            # Collect SNAC codes from new tokens
             for token_id in new_tokens:
-                # Stop if we hit EOS
                 if token_id == CODE_END_TOKEN_ID:
                     break
                 
-                # Only collect valid SNAC tokens
                 if SNAC_MIN_ID <= token_id <= SNAC_MAX_ID:
                     snac_buffer.append(token_id)
             
-            # Yield audio when we have enough tokens for a window
             while len(snac_buffer) >= last_yield_position + self.WINDOW_SIZE:
-                # Get window of 28 tokens
                 window_start = last_yield_position
                 window_end = window_start + self.WINDOW_SIZE
                 window = snac_buffer[window_start:window_end]
                 
                 if len(window) == self.WINDOW_SIZE:
-                    # Decode window to audio
                     audio_bytes = await self.snac_decoder.decode_single_async(window)
                     
                     if audio_bytes:
-                        # Extract middle portion of audio
                         audio_samples = len(audio_bytes) // 2
                         middle_start_sample = (audio_samples - self.MIDDLE_SAMPLES) // 2
                         middle_end_sample = middle_start_sample + self.MIDDLE_SAMPLES
                         
-                        # Convert to byte positions
                         middle_start_byte = middle_start_sample * 2
                         middle_end_byte = middle_end_sample * 2
                         
-                        # Extract middle chunk
                         audio_chunk = audio_bytes[middle_start_byte:middle_end_byte]
                         
                         chunk_count += 1
@@ -138,11 +127,22 @@ class Maya1SlidingWindowPipeline:
                             print(f" First chunk ready")
                         
                         yield audio_chunk
+                        
+                        del audio_bytes
+                        del audio_chunk
                 
-                # Move forward by stride
                 last_yield_position += self.YIELD_STRIDE
+                
+                if last_yield_position > self.WINDOW_SIZE * 2:
+                    tokens_to_keep = last_yield_position - self.WINDOW_SIZE
+                    snac_buffer = snac_buffer[tokens_to_keep:]
+                    last_yield_position = self.WINDOW_SIZE
+                
+                cleanup_counter += 1
+                if cleanup_counter % 10 == 0:
+                    import gc
+                    gc.collect()
             
-            # Check if generation is done
             if CODE_END_TOKEN_ID in new_tokens:
                 break
         
