@@ -1,4 +1,3 @@
-import os
 import io
 import wave
 import time
@@ -25,6 +24,8 @@ from .constants import (
     OPENAI_SUPPORTED_FORMATS,
     OPENAI_DEFAULT_MODEL,
     OPENAI_SUPPORTED_MODELS,
+    SNAC_BATCH_SIZE,
+    SNAC_BATCH_TIMEOUT_MS,
 )
 
 # Timeout settings (seconds)
@@ -76,7 +77,7 @@ async def startup_event():
     prompt_builder = Maya1PromptBuilder(model.tokenizer, model)
     
     # Initialize SNAC decoder
-    snac_decoder = SNACDecoder(enable_batching=True, max_batch_size=64, batch_timeout_ms=15)
+    snac_decoder = SNACDecoder(enable_batching=True, max_batch_size=SNAC_BATCH_SIZE, batch_timeout_ms=SNAC_BATCH_TIMEOUT_MS)
     await snac_decoder.start_batch_processor()
     
     # Initialize pipelines
