@@ -20,6 +20,11 @@ from .constants import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_REPETITION_PENALTY,
     AUDIO_SAMPLE_RATE,
+    OPENAI_VOICE_MAPPINGS,
+    OPENAI_SUPPORTED_VOICES,
+    OPENAI_SUPPORTED_FORMATS,
+    OPENAI_DEFAULT_MODEL,
+    OPENAI_SUPPORTED_MODELS,
 )
 
 # Timeout settings (seconds)
@@ -123,6 +128,130 @@ def create_wav_header(sample_rate: int = 24000, channels: int = 1, bits_per_samp
     return header
 
 
+def convert_audio_format(audio_bytes: bytes, input_format: str = "wav", output_format: str = "mp3", sample_rate: int = 24000) -> bytes:
+    """Convert audio between different formats using pydub."""
+    try:
+        from pydub import AudioSegment
+        import io
+        
+        input_buffer = None
+        output_buffer = None
+        audio = None
+        
+        try:
+            if input_format == "wav":
+                input_buffer = io.BytesIO(audio_bytes)
+                audio = AudioSegment.from_wav(input_buffer)
+            elif input_format == "mp3":
+                input_buffer = io.BytesIO(audio_bytes)
+                audio = AudioSegment.from_mp3(input_buffer)
+            elif input_format == "flac":
+                input_buffer = io.BytesIO(audio_bytes)
+                audio = AudioSegment.from_flac(input_buffer)
+            else:
+                audio = AudioSegment(
+                    audio_bytes,
+                    sample_width=2,
+                    frame_rate=sample_rate,
+                    channels=1
+                )
+            
+            if output_format == "pcm":
+                raw_data = audio.raw_data
+                del audio
+                return raw_data
+            
+            output_buffer = io.BytesIO()
+            if output_format == "mp3":
+                audio.export(output_buffer, format="mp3", bitrate="128k")
+            elif output_format == "opus":
+                audio.export(output_buffer, format="opus")
+            elif output_format == "aac":
+                audio.export(output_buffer, format="aac")
+            elif output_format == "flac":
+                audio.export(output_buffer, format="flac")
+            elif output_format == "wav":
+                audio.export(output_buffer, format="wav")
+            else:
+                raise ValueError(f"Unsupported output format: {output_format}")
+            
+            result = output_buffer.getvalue()
+            return result
+        
+        finally:
+            if audio is not None:
+                del audio
+            if input_buffer is not None:
+                input_buffer.close()
+            if output_buffer is not None:
+                output_buffer.close()
+    
+    except ImportError:
+        if output_format == "wav":
+            return audio_bytes
+        else:
+            raise HTTPException(
+                status_code=501, 
+                detail=f"Audio format conversion to {output_format} requires pydub. Install with: pip install pydub"
+            )
+
+
+def adjust_audio_speed(audio_bytes: bytes, speed: float, sample_rate: int = 24000) -> bytes:
+    """Adjust audio playback speed."""
+    if speed == 1.0:
+        return audio_bytes
+    
+    try:
+        from pydub import AudioSegment
+        import io
+        
+        input_buffer = None
+        output_buffer = None
+        audio = None
+        audio_adjusted = None
+        
+        try:
+            input_buffer = io.BytesIO(audio_bytes)
+            audio = AudioSegment.from_wav(input_buffer)
+            
+            audio_adjusted = audio._spawn(audio.raw_data, overrides={
+                "frame_rate": int(audio.frame_rate * speed)
+            })
+            
+            audio_adjusted = audio_adjusted.set_frame_rate(sample_rate)
+            
+            output_buffer = io.BytesIO()
+            audio_adjusted.export(output_buffer, format="wav")
+            result = output_buffer.getvalue()
+            return result
+        
+        finally:
+            if audio_adjusted is not None:
+                del audio_adjusted
+            if audio is not None:
+                del audio
+            if input_buffer is not None:
+                input_buffer.close()
+            if output_buffer is not None:
+                output_buffer.close()
+    
+    except ImportError:
+        return audio_bytes
+
+
+def get_content_type_for_format(format: str) -> str:
+    """Get appropriate MIME type for audio format."""
+    content_types = {
+        "mp3": "audio/mpeg",
+        "opus": "audio/opus",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "wav": "audio/wav",
+        "pcm": "audio/pcm"
+    }
+    return content_types.get(format, "application/octet-stream")
+
+
 # ============================================================================
 # Request/Response Models
 # ============================================================================
@@ -164,6 +293,32 @@ class TTSRequest(BaseModel):
     )
 
 
+class OpenAITTSRequest(BaseModel):
+    """OpenAI-compatible TTS request."""
+    model: str = Field(
+        default=OPENAI_DEFAULT_MODEL,
+        description=f"Model to use for TTS. Supported: {', '.join(OPENAI_SUPPORTED_MODELS)}"
+    )
+    input: str = Field(
+        ...,
+        description="The text to generate audio for. Maximum length: 4096 characters."
+    )
+    voice: str = Field(
+        ...,
+        description=f"The voice to use for generation. Supported: {', '.join(OPENAI_SUPPORTED_VOICES)}"
+    )
+    response_format: str = Field(
+        default="mp3",
+        description=f"The format to audio in. Supported: {', '.join(OPENAI_SUPPORTED_FORMATS)}"
+    )
+    speed: float = Field(
+        default=1.0,
+        ge=0.25,
+        le=4.0,
+        description="The speed of the generated audio. 1.0 is normal speed."
+    )
+
+
 # ============================================================================
 # Endpoints
 # ============================================================================
@@ -177,9 +332,15 @@ async def root():
         "status": "running",
         "model": "Maya1-Voice (open source)",
         "endpoints": {
-            "generate": "/v1/tts/generate (POST)",
+            "maya1_generate": "/v1/tts/generate (POST) - Maya1 native API",
+            "openai_speech": "/v1/audio/speech (POST) - OpenAI compatible API",
             "health": "/health (GET)",
         },
+        "openai_compatibility": {
+            "voices": OPENAI_SUPPORTED_VOICES,
+            "formats": OPENAI_SUPPORTED_FORMATS,
+            "models": OPENAI_SUPPORTED_MODELS,
+        }
     }
 
 
@@ -194,12 +355,12 @@ async def health_check():
 
 
 # ============================================================================
-# TTS Generation Endpoint
+# TTS Generation Endpoints
 # ============================================================================
 
 @app.post("/v1/tts/generate")
 async def generate_tts(request: TTSRequest):
-    """Generate TTS audio from description and text."""
+    """Generate TTS audio from description and text (Maya1 native API)."""
     
     try:
         # Route to streaming or non-streaming
@@ -228,6 +389,89 @@ async def generate_tts(request: TTSRequest):
         raise
     except Exception as e:
         print(f" Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/audio/speech")
+async def openai_tts(request: OpenAITTSRequest):
+    """OpenAI-compatible TTS endpoint."""
+    
+    try:
+        # Validate inputs
+        if request.model not in OPENAI_SUPPORTED_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported model: {request.model}. Supported models: {', '.join(OPENAI_SUPPORTED_MODELS)}"
+            )
+        
+        if request.voice not in OPENAI_SUPPORTED_VOICES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported voice: {request.voice}. Supported voices: {', '.join(OPENAI_SUPPORTED_VOICES)}"
+            )
+        
+        if request.response_format not in OPENAI_SUPPORTED_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported format: {request.response_format}. Supported formats: {', '.join(OPENAI_SUPPORTED_FORMATS)}"
+            )
+        
+        if len(request.input) > 4096:
+            raise HTTPException(
+                status_code=400,
+                detail="Input text exceeds maximum length of 4096 characters"
+            )
+        
+        # Map OpenAI voice to Maya1 description
+        description = OPENAI_VOICE_MAPPINGS[request.voice]
+        
+        audio_bytes = await pipeline.generate_speech(
+            description=description,
+            text=request.input,
+            temperature=DEFAULT_TEMPERATURE,
+            top_p=DEFAULT_TOP_P,
+            max_tokens=DEFAULT_MAX_TOKENS,
+            repetition_penalty=DEFAULT_REPETITION_PENALTY,
+            seed=None,
+        )
+        
+        if audio_bytes is None:
+            raise HTTPException(status_code=500, detail="Audio generation failed")
+        
+        if request.speed != 1.0:
+            speed_adjusted_audio = adjust_audio_speed(audio_bytes, request.speed)
+            del audio_bytes
+            audio_bytes = speed_adjusted_audio
+        
+        if request.response_format != "wav":
+            converted_audio = convert_audio_format(audio_bytes, "wav", request.response_format)
+            del audio_bytes
+            audio_bytes = converted_audio
+        
+        # Return appropriate response
+        content_type = get_content_type_for_format(request.response_format)
+        
+        if request.response_format == "pcm":
+            return StreamingResponse(
+                io.BytesIO(audio_bytes),
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=output.{request.response_format}"
+                }
+            )
+        else:
+            return StreamingResponse(
+                io.BytesIO(audio_bytes),
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{request.response_format}"
+                }
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f" OpenAI TTS Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

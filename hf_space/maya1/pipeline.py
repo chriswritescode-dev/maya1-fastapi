@@ -75,7 +75,6 @@ class Maya1Pipeline:
             seed=seed if seed is not None else DEFAULT_SEED,
         )
         
-        # Generate tokens
         outputs = await self.model.generate(prompt, sampling_params)
         
         if not outputs or len(outputs) == 0:
@@ -84,19 +83,23 @@ class Maya1Pipeline:
         output = outputs[0]
         generated_token_ids = output.outputs[0].token_ids
         
-        # Extract SNAC codes
         snac_codes = self._extract_snac_codes(generated_token_ids)
+        
+        del generated_token_ids
+        del output
+        del outputs
         
         if not snac_codes:
             return None
         
-        # Decode to audio
         audio_bytes = await self.snac_decoder.decode_single_async(snac_codes)
         
         if audio_bytes:
             frames = len(snac_codes) // 7
             duration_sec = frames / 6.86
             print(f" Generated {frames} frames (~{duration_sec:.1f}s audio)")
+        
+        del snac_codes
         
         return audio_bytes
     

@@ -134,44 +134,59 @@ def convert_audio_format(audio_bytes: bytes, input_format: str = "wav", output_f
         from pydub import AudioSegment
         import io
         
-        # Create AudioSegment from raw audio bytes
-        if input_format == "wav":
-            audio = AudioSegment.from_wav(io.BytesIO(audio_bytes))
-        elif input_format == "mp3":
-            audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-        elif input_format == "flac":
-            audio = AudioSegment.from_flac(io.BytesIO(audio_bytes))
-        else:
-            # For raw PCM or other formats, create from raw data
-            audio = AudioSegment(
-                audio_bytes,
-                sample_width=2,  # 16-bit
-                frame_rate=sample_rate,
-                channels=1
-            )
+        input_buffer = None
+        output_buffer = None
+        audio = None
         
-        # Export to desired format
-        output_buffer = io.BytesIO()
-        if output_format == "mp3":
-            audio.export(output_buffer, format="mp3", bitrate="128k")
-        elif output_format == "opus":
-            audio.export(output_buffer, format="opus")
-        elif output_format == "aac":
-            audio.export(output_buffer, format="aac")
-        elif output_format == "flac":
-            audio.export(output_buffer, format="flac")
-        elif output_format == "wav":
-            audio.export(output_buffer, format="wav")
-        elif output_format == "pcm":
-            # Return raw PCM data
-            return audio.raw_data
-        else:
-            raise ValueError(f"Unsupported output format: {output_format}")
+        try:
+            if input_format == "wav":
+                input_buffer = io.BytesIO(audio_bytes)
+                audio = AudioSegment.from_wav(input_buffer)
+            elif input_format == "mp3":
+                input_buffer = io.BytesIO(audio_bytes)
+                audio = AudioSegment.from_mp3(input_buffer)
+            elif input_format == "flac":
+                input_buffer = io.BytesIO(audio_bytes)
+                audio = AudioSegment.from_flac(input_buffer)
+            else:
+                audio = AudioSegment(
+                    audio_bytes,
+                    sample_width=2,
+                    frame_rate=sample_rate,
+                    channels=1
+                )
+            
+            if output_format == "pcm":
+                raw_data = audio.raw_data
+                del audio
+                return raw_data
+            
+            output_buffer = io.BytesIO()
+            if output_format == "mp3":
+                audio.export(output_buffer, format="mp3", bitrate="128k")
+            elif output_format == "opus":
+                audio.export(output_buffer, format="opus")
+            elif output_format == "aac":
+                audio.export(output_buffer, format="aac")
+            elif output_format == "flac":
+                audio.export(output_buffer, format="flac")
+            elif output_format == "wav":
+                audio.export(output_buffer, format="wav")
+            else:
+                raise ValueError(f"Unsupported output format: {output_format}")
+            
+            result = output_buffer.getvalue()
+            return result
         
-        return output_buffer.getvalue()
+        finally:
+            if audio is not None:
+                del audio
+            if input_buffer is not None:
+                input_buffer.close()
+            if output_buffer is not None:
+                output_buffer.close()
     
     except ImportError:
-        # If pydub is not available, return original audio (WAV format)
         if output_format == "wav":
             return audio_bytes
         else:
@@ -190,31 +205,37 @@ def adjust_audio_speed(audio_bytes: bytes, speed: float, sample_rate: int = 2400
         from pydub import AudioSegment
         import io
         
-        # Load audio
-        audio = AudioSegment.from_wav(io.BytesIO(audio_bytes))
+        input_buffer = None
+        output_buffer = None
+        audio = None
+        audio_adjusted = None
         
-        # Adjust speed by changing frame rate
-        if speed > 1.0:
-            # Faster: increase frame rate
-            audio = audio._spawn(audio.raw_data, overrides={
+        try:
+            input_buffer = io.BytesIO(audio_bytes)
+            audio = AudioSegment.from_wav(input_buffer)
+            
+            audio_adjusted = audio._spawn(audio.raw_data, overrides={
                 "frame_rate": int(audio.frame_rate * speed)
             })
-        else:
-            # Slower: decrease frame rate
-            audio = audio._spawn(audio.raw_data, overrides={
-                "frame_rate": int(audio.frame_rate * speed)
-            })
+            
+            audio_adjusted = audio_adjusted.set_frame_rate(sample_rate)
+            
+            output_buffer = io.BytesIO()
+            audio_adjusted.export(output_buffer, format="wav")
+            result = output_buffer.getvalue()
+            return result
         
-        # Convert back to original sample rate
-        audio = audio.set_frame_rate(sample_rate)
-        
-        # Export back to WAV
-        output_buffer = io.BytesIO()
-        audio.export(output_buffer, format="wav")
-        return output_buffer.getvalue()
+        finally:
+            if audio_adjusted is not None:
+                del audio_adjusted
+            if audio is not None:
+                del audio
+            if input_buffer is not None:
+                input_buffer.close()
+            if output_buffer is not None:
+                output_buffer.close()
     
     except ImportError:
-        # If pydub is not available, return original audio
         return audio_bytes
 
 
@@ -404,7 +425,6 @@ async def openai_tts(request: OpenAITTSRequest):
         # Map OpenAI voice to Maya1 description
         description = OPENAI_VOICE_MAPPINGS[request.voice]
         
-        # Generate audio using Maya1 pipeline
         audio_bytes = await pipeline.generate_speech(
             description=description,
             text=request.input,
@@ -418,13 +438,15 @@ async def openai_tts(request: OpenAITTSRequest):
         if audio_bytes is None:
             raise HTTPException(status_code=500, detail="Audio generation failed")
         
-        # Adjust speed if needed
         if request.speed != 1.0:
-            audio_bytes = adjust_audio_speed(audio_bytes, request.speed)
+            speed_adjusted_audio = adjust_audio_speed(audio_bytes, request.speed)
+            del audio_bytes
+            audio_bytes = speed_adjusted_audio
         
-        # Convert to requested format
         if request.response_format != "wav":
-            audio_bytes = convert_audio_format(audio_bytes, "wav", request.response_format)
+            converted_audio = convert_audio_format(audio_bytes, "wav", request.response_format)
+            del audio_bytes
+            audio_bytes = converted_audio
         
         # Return appropriate response
         content_type = get_content_type_for_format(request.response_format)
