@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import asyncio
-import gc
+import time
 from typing import List, Optional, Tuple
 from snac import SNAC
 
@@ -9,8 +9,9 @@ from .constants import (
     CODE_END_TOKEN_ID,
     CODE_TOKEN_OFFSET,
     SNAC_MODEL_NAME,
-    SNAC_SAMPLE_RATE,
     SNAC_TOKENS_PER_FRAME,
+    SNAC_BATCH_SIZE,
+    SNAC_BATCH_TIMEOUT_MS,
 )
 
 
@@ -28,8 +29,8 @@ class SNACDecoder:
         device: str = "cuda",
         compile_decoder: bool = False,
         enable_batching: bool = False,
-        max_batch_size: int = 64,
-        batch_timeout_ms: int = 15,
+        max_batch_size: int = SNAC_BATCH_SIZE,
+        batch_timeout_ms: int = SNAC_BATCH_TIMEOUT_MS,
     ):
         """
         Initialize SNAC decoder.
@@ -46,6 +47,10 @@ class SNACDecoder:
         self.max_batch_size = max_batch_size
         self.batch_timeout_ms = batch_timeout_ms
         
+        self.total_processed = 0
+        self.total_batches = 0
+        self.peak_mem_mb = 0.0
+        
         print(f"Loading SNAC 24kHz model to {device}...")
         self.snac_model = SNAC.from_pretrained(SNAC_MODEL_NAME).eval().to(device)
         
@@ -55,10 +60,11 @@ class SNACDecoder:
         
         # Batching infrastructure
         if enable_batching:
-            self.request_queue = asyncio.Queue()
+            max_queue_size = max_batch_size * 4
+            self.request_queue = asyncio.Queue(maxsize=max_queue_size)
             self.batch_processor_task = None
             self._running = False
-            print(f"Batching enabled (max_batch={max_batch_size}, timeout={batch_timeout_ms}ms)")
+            print(f"Batching enabled (max_batch={max_batch_size}, timeout={batch_timeout_ms}ms, max_queue={max_queue_size})")
         
         print(f"SNAC decoder initialized")
     
@@ -85,11 +91,26 @@ class SNACDecoder:
         
         print(f"SNAC decoder compiled")
     
-    def _cleanup_memory(self):
-        """Force cleanup of GPU memory"""
+    def _get_gpu_memory_mb(self) -> float:
         if self.device == "cuda":
-            torch.cuda.empty_cache()
-        gc.collect()
+            return torch.cuda.memory_allocated() / 1024 / 1024
+        return 0.0
+    
+    def _log_memory(self, tag: str = ""):
+        if self.device == "cuda":
+            allocated = torch.cuda.memory_allocated() / 1024 / 1024
+            reserved = torch.cuda.memory_reserved() / 1024 / 1024
+            print(f"[GPU Memory {tag}] Allocated: {allocated:.1f}MB, Reserved: {reserved:.1f}MB")
+            if allocated > self.peak_mem_mb:
+                self.peak_mem_mb = allocated
+    
+    def get_stats(self) -> dict:
+        return {
+            "total_processed": self.total_processed,
+            "total_batches": self.total_batches,
+            "peak_memory_mb": self.peak_mem_mb,
+            "current_memory_mb": self._get_gpu_memory_mb(),
+        }
     
     def unpack_snac_from_7(self, vocab_ids: List[int]) -> List[List[int]]:
         """
@@ -417,6 +438,9 @@ class SNACDecoder:
         if not batch:
             return
         
+        start_time = time.time()
+        self.total_batches += 1
+        
         # Extract components
         token_sequences = [item[0] for item in batch]
         trim_warmup_flags = [item[1] for item in batch]
@@ -425,6 +449,8 @@ class SNACDecoder:
         
         lengths = [len(tokens) for tokens in token_sequences]
         can_batch_efficiently = len(set(lengths)) == 1
+        
+        self._log_memory(f"Batch start (size={len(batch)})")
         
         if can_batch_efficiently and len(batch) > 1:
             # Efficient batching: all same length
@@ -437,6 +463,8 @@ class SNACDecoder:
                 for future, audio_bytes in zip(futures, audio_bytes_list):
                     if not future.done():
                         future.set_result(audio_bytes)
+                
+                self.total_processed += len(batch)
             
             except Exception as e:
                 # Set exceptions
@@ -452,9 +480,17 @@ class SNACDecoder:
                     )
                     if not future.done():
                         future.set_result(audio_bytes)
+                    self.total_processed += 1
                 except Exception as e:
                     if not future.done():
                         future.set_exception(e)
+        
+        elapsed = (time.time() - start_time) * 1000
+        self._log_memory(f"Batch end (took {elapsed:.1f}ms)")
+        
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
     
     async def _decode_batch_same_length(
         self, 
@@ -483,9 +519,6 @@ class SNACDecoder:
         if not valid_indices:
             return [None] * len(token_sequences)
         
-        batch_size = len(valid_indices)
-        frames = len(unpacked_list[valid_indices[0]][0])
-        
         codes = None
         z_q = None
         audio_batch = None
@@ -501,7 +534,14 @@ class SNACDecoder:
             ]
             
             z_q = self.snac_model.quantizer.from_codes(codes)
+            
+            del codes
+            codes = None
+            
             audio_batch = self.snac_model.decoder(z_q)
+            
+            del z_q
+            z_q = None
             
             for batch_idx, orig_idx in enumerate(valid_indices):
                 audio = audio_batch[batch_idx, 0].detach().cpu().numpy()
@@ -515,6 +555,9 @@ class SNACDecoder:
                 
                 audio_int16 = (audio * 32767).astype(np.int16)
                 audio_bytes_list[orig_idx] = audio_int16.tobytes()
+            
+            del audio_batch
+            audio_batch = None
         
         finally:
             if audio_batch is not None:
@@ -522,11 +565,10 @@ class SNACDecoder:
             if z_q is not None:
                 del z_q
             if codes is not None:
-                for code in codes:
-                    del code
                 del codes
             
             if self.device == "cuda":
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
         
         return audio_bytes_list
