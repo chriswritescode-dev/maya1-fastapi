@@ -112,26 +112,23 @@ class Maya1SlidingWindowPipeline:
                 window = snac_buffer[window_start:window_end]
                 
                 if len(window) == self.WINDOW_SIZE:
-                    audio_bytes = await self.snac_decoder.decode_single_async(window)
+                    # Use sliding window mode for proper batching
+                    audio_bytes = await self.snac_decoder.decode_single_async(
+                        window, 
+                        trim_warmup=False,  # Don't trim, we handle it here
+                        use_sliding_window=True  # Tell decoder this is sliding window
+                    )
                     
                     if audio_bytes:
-                        audio_samples = len(audio_bytes) // 2
-                        middle_start_sample = (audio_samples - self.MIDDLE_SAMPLES) // 2
-                        middle_end_sample = middle_start_sample + self.MIDDLE_SAMPLES
-                        
-                        middle_start_byte = middle_start_sample * 2
-                        middle_end_byte = middle_end_sample * 2
-                        
-                        audio_chunk = audio_bytes[middle_start_byte:middle_end_byte]
-                        
+                        # When use_sliding_window=True, decoder already returns middle 2048 samples
+                        # So we can directly use the audio_bytes
                         chunk_count += 1
                         if chunk_count == 1:
                             print(f" First chunk ready")
                         
-                        yield audio_chunk
+                        yield audio_bytes
                         
                         del audio_bytes
-                        del audio_chunk
                 
                 last_yield_position += self.YIELD_STRIDE
                 
@@ -156,10 +153,15 @@ class Maya1SlidingWindowPipeline:
             # If we have a full window, use it for better quality
             if remaining_tokens >= self.WINDOW_SIZE:
                 window = snac_buffer[-self.WINDOW_SIZE:]
-                audio_bytes = await self.snac_decoder.decode_single_async(window)
+                # Use sliding window for consistency
+                audio_bytes = await self.snac_decoder.decode_single_async(
+                    window,
+                    trim_warmup=False,
+                    use_sliding_window=True
+                )
                 if audio_bytes:
-                    # Only keep the last part for the final chunk
-                    yield audio_bytes[-self.MIDDLE_SAMPLES * 2:]
+                    # Decoder already returns middle 2048 samples when use_sliding_window=True
+                    yield audio_bytes
             else:
                 # Process whatever tokens we have left (must be divisible by 7)
                 final_tokens = snac_buffer[last_yield_position:]

@@ -145,12 +145,20 @@ class SNACDecoder:
         if vocab_ids and vocab_ids[-1] == CODE_END_TOKEN_ID:
             vocab_ids = vocab_ids[:-1]
         
+        # Check for incomplete frames
+        original_len = len(vocab_ids)
+        remainder = original_len % SNAC_TOKENS_PER_FRAME
+        
         # Ensure complete frames (divisible by 7)
-        frames = len(vocab_ids) // SNAC_TOKENS_PER_FRAME
+        frames = original_len // SNAC_TOKENS_PER_FRAME
         vocab_ids = vocab_ids[:frames * SNAC_TOKENS_PER_FRAME]
         
         if frames == 0:
             return [[], [], []]
+        
+        # Log if we're truncating tokens
+        if remainder > 0:
+            print(f"  Warning: Truncating {remainder} incomplete tokens at end (total: {original_len}, keeping: {frames * SNAC_TOKENS_PER_FRAME})")
         
         l1, l2, l3 = [], [], []
         
@@ -466,6 +474,14 @@ class SNACDecoder:
         can_batch_efficiently = len(set(lengths)) == 1
         
         self._log_memory(f"Batch start (size={len(batch)})")
+        
+        # Log batch details
+        if len(batch) > 1:
+            unique_lengths = set(lengths)
+            if len(unique_lengths) > 1:
+                print(f"  Batch has mixed lengths: {sorted(unique_lengths)} - will process sequentially")
+            else:
+                print(f"  Batch has uniform length: {lengths[0]} tokens - processing in parallel")
         
         if can_batch_efficiently and len(batch) > 1:
             # Efficient batching: all same length
